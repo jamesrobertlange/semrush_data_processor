@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header">
+                <h3><i class="fas fa-upload"></i> Upload and Process SEMrush Data</h3>
+            </div>
+            <div class="card-body">
+                <p class="text-muted">
+                    Upload SEMrush Organic Overview CSV exports to combine and process them. 
+                    The tool removes duplicates, filters by position, and identifies branded keywords.
+                </p>
+
+                <form action="{{ url_for('upload_files') }}" method="post" enctype="multipart/form-data" id="uploadForm">
+                    <div class="upload-area mb-4">
+                        <i class="fas fa-cloud-upload-alt fa-3x text-muted mb-3"></i>
+                        <h5>Select SEMrush CSV Files</h5>
+                        <input type="file" class="form-control" id="files" name="files" multiple accept=".csv" required>
+                    </div>
+
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label for="max_position" class="form-label">Maximum Position</label>
+                            <input type="range" class="form-range" id="max_position" name="max_position" 
+                                   min="1" max="100" value="11" oninput="updatePositionValue(this.value)">
+                            <small class="text-muted">Position: <span id="positionValue">11</span></small>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="branded_terms" class="form-label">Branded Terms (comma-separated)</label>
+                        <input type="text" class="form-control" id="branded_terms" name="branded_terms" 
+                               placeholder="e.g., client name, brand, company">
+                        <small class="text-muted">Keywords containing these terms will be flagged as branded</small>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-lg w-100">
+                        <i class="fas fa-rocket"></i> Process Data
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-info-circle"></i> Required Columns</h5>
+            </div>
+            <div class="card-body">
+                <ul class="list-unstyled">
+                    <li><i class="fas fa-check text-success"></i> Keyword</li>
+                    <li><i class="fas fa-check text-success"></i> Position</li>
+                    <li><i class="fas fa-check text-success"></i> Search Volume</li>
+                    <li><i class="fas fa-check text-success"></i> URL</li>
+                    <li><i class="fas fa-check text-success"></i> Traffic</li>
+                    <li><i class="fas fa-check text-success"></i> Timestamp</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function updatePositionValue(value) {
+    document.getElementById('positionValue').textContent = value;
+}
+</script>
+{% endblock %}

@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h2><i class="fas fa-chart-line"></i> Processing Results</h2>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ "{:,}".format(stats.total_keywords) }}</h3>
+                <p class="mb-0">Total Keywords</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ "{:,}".format(stats.total_traffic) }}</h3>
+                <p class="mb-0">Total Traffic</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ "{:,}".format(stats.unique_urls) }}</h3>
+                <p class="mb-0">Unique URLs</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ stats.files_processed }}</h3>
+                <p class="mb-0">Files Processed</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if stats.branded_keywords is defined %}
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body text-center">
+                <h4>{{ "{:,}".format(stats.branded_keywords) }}</h4>
+                <p class="mb-0 text-muted">Branded Keywords</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body text-center">
+                <h4>{{ "{:,}".format(stats.non_branded_keywords) }}</h4>
+                <p class="mb-0 text-muted">Non-Branded Keywords</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h4><i class="fas fa-download"></i> Download Results</h4>
+            </div>
+            <div class="card-body">
+                <a href="{{ url_for('download_file', filename='semrush_processed.csv', temp_dir=temp_dir) }}" 
+                   class="btn btn-primary btn-lg w-100">
+                    <i class="fas fa-file-csv"></i> Download Processed CSV
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h4><i class="fas fa-table"></i> Data Preview</h4>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    {{ preview_data|safe }}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-3">
+    <div class="col-12">
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">
+            <i class="fas fa-arrow-left"></i> Process More Files
+        </a>
+    </div>
+</div>
+{% endblock %}

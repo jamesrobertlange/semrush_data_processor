@@ -1,0 +1,801 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+config/
+  __init__.py
+  settings.py
+modules/
+  __init__.py
+  data_processor.py
+templates/
+  base.html
+  index.html
+  results.html
+app.py
+Makefile
+pyproject.toml
+README.md
+run.sh
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="config/__init__.py">
+from .settings import config
+</file>
+
+<file path="config/settings.py">
+from dataclasses import dataclass
+
+
+@dataclass
+class AppConfig:
+    MAX_FILE_SIZE_MB: int = 999999
+    MAX_WORKERS: int = 3
+    PREVIEW_ROWS: int = 10
+
+
+config = AppConfig()
+</file>
+
+<file path="modules/__init__.py">
+from .data_processor import process_csv_files, convert_df_to_csv
+</file>
+
+<file path="modules/data_processor.py">
+import pandas as pd
+import numpy as np
+import concurrent.futures
+import gc
+
+
+def process_csv_files(uploaded_files, max_position, branded_terms):
+    """Process SEMrush CSV files with branded keyword identification"""
+    
+    def process_single_file(file):
+        """Process a single file with memory optimization"""
+        try:
+            file.seek(0)
+            df = pd.read_csv(file)
+            
+            # Optimize data types to save memory
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    if df[col].nunique() / len(df) < 0.5:
+                        df[col] = df[col].astype('category')
+                elif df[col].dtype == 'int64':
+                    df[col] = pd.to_numeric(df[col], downcast='integer')
+                elif df[col].dtype == 'float64':
+                    df[col] = pd.to_numeric(df[col], downcast='float')
+            return df
+        except Exception as e:
+            print(f"Error processing file: {str(e)}")
+            return None
+    
+    # Process files
+    print("Reading CSV files...")
+    
+    dfs = []
+    if len(uploaded_files) > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_file = {executor.submit(process_single_file, file): file 
+                             for file in uploaded_files}
+            
+            for future in concurrent.futures.as_completed(future_to_file):
+                df = future.result()
+                if df is not None:
+                    dfs.append(df)
+    else:
+        df = process_single_file(uploaded_files[0])
+        if df is not None:
+            dfs.append(df)
+    
+    if not dfs:
+        print("No files could be processed successfully")
+        return None
+    
+    print("Combining and deduplicating data...")
+    
+    # Combine dataframes
+    combined_df = pd.concat(dfs, ignore_index=True)
+    del dfs
+    gc.collect()
+    
+    # Validate required columns
+    required_columns = ['Keyword', 'Position', 'Search Volume', 'URL', 'Traffic', 'Timestamp']
+    missing_columns = [col for col in required_columns if col not in combined_df.columns]
+    if missing_columns:
+        print(f"Missing required columns: {missing_columns}")
+        return None
+    
+    # Remove duplicates
+    initial_count = len(combined_df)
+    combined_df = combined_df.drop_duplicates(
+        subset=['Keyword', 'URL', 'Position', 'Timestamp'], 
+        keep='first'
+    )
+    dedup_count = initial_count - len(combined_df)
+    if dedup_count > 0:
+        print(f"Removed {dedup_count:,} duplicate rows")
+    
+    combined_df.reset_index(drop=True, inplace=True)
+    
+    # Filter by position
+    print("Filtering by position...")
+    filtered_df = combined_df[combined_df["Position"] <= max_position]
+    
+    # Select and rename columns
+    column_mapping = {
+        "Keyword": "keyword",
+        "Position": "position",
+        "Search Volume": "search_volume",
+        "Keyword Intents": "keyword_intents",
+        "URL": "url",
+        "Traffic": "traffic",
+        "Timestamp": "timestamp"
+    }
+    
+    available_columns = {k: v for k, v in column_mapping.items() if k in filtered_df.columns}
+    output_df = filtered_df[list(available_columns.keys())].rename(columns=available_columns)
+    
+    # Clean and process Traffic column
+    print("Processing traffic data...")
+    if 'traffic' in output_df.columns:
+        traffic_cleaned = output_df['traffic'].astype(str).str.replace(',', '').str.replace('$', '')
+        traffic_numeric = pd.to_numeric(traffic_cleaned, errors='coerce').fillna(0).astype(int)
+        output_df = output_df.assign(traffic=traffic_numeric)
+        output_df = output_df.sort_values(by='traffic', ascending=False)
+    
+    # Normalize timestamps to YYYY-MM-11 format
+    print("Normalizing timestamps...")
+    if 'timestamp' in output_df.columns:
+        timestamp_dt = pd.to_datetime(output_df['timestamp'], errors='coerce')
+        normalized_timestamps = timestamp_dt.dt.strftime('%Y-%m') + '-11'
+        normalized_timestamps = normalized_timestamps.replace('NaT-11', pd.NaT)
+        output_df = output_df.assign(timestamp=normalized_timestamps)
+    
+    # Process branded keywords if provided
+    if branded_terms and any(term.strip() for term in branded_terms):
+        print("Identifying branded keywords...")
+        pattern = '|'.join(r'\b{}\b'.format(term.strip()) for term in branded_terms if term.strip())
+        output_df["branded"] = output_df["keyword"].str.lower().str.contains(pattern, na=False, regex=True)
+    
+    print("Processing complete!")
+    
+    return output_df
+
+
+def convert_df_to_csv(df):
+    """Convert dataframe to CSV string"""
+    return df.to_csv(index=False)
+</file>
+
+<file path="templates/base.html">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}SEMrush Data Processor{% endblock %}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        .navbar-brand {
+            font-weight: bold;
+        }
+        .card {
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+            border: 1px solid rgba(0, 0, 0, 0.125);
+        }
+        .btn-primary {
+            background-color: #007bff;
+            border-color: #007bff;
+        }
+        .table-responsive {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .upload-area {
+            border: 2px dashed #ccc;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            transition: border-color 0.3s ease;
+        }
+        .upload-area:hover {
+            border-color: #007bff;
+        }
+        .stats-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('index') }}">
+                <i class="fas fa-search"></i> SEMrush Data Processor
+            </a>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                {% for message in messages %}
+                    <div class="alert alert-info alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </div>
+
+    <footer class="bg-dark text-light mt-5 py-3">
+        <div class="container text-center">
+            <p class="mb-0">Created by <a href="https://jamesrobertlange.com" class="text-light">Jimmy Lange</a></p>
+        </div>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
+</file>
+
+<file path="templates/index.html">
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header">
+                <h3><i class="fas fa-upload"></i> Upload and Process SEMrush Data</h3>
+            </div>
+            <div class="card-body">
+                <p class="text-muted">
+                    Upload SEMrush Organic Overview CSV exports to combine and process them. 
+                    The tool removes duplicates, filters by position, and identifies branded keywords.
+                </p>
+
+                <form action="{{ url_for('upload_files') }}" method="post" enctype="multipart/form-data" id="uploadForm">
+                    <div class="upload-area mb-4">
+                        <i class="fas fa-cloud-upload-alt fa-3x text-muted mb-3"></i>
+                        <h5>Select SEMrush CSV Files</h5>
+                        <input type="file" class="form-control" id="files" name="files" multiple accept=".csv" required>
+                    </div>
+
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label for="max_position" class="form-label">Maximum Position</label>
+                            <input type="range" class="form-range" id="max_position" name="max_position" 
+                                   min="1" max="100" value="11" oninput="updatePositionValue(this.value)">
+                            <small class="text-muted">Position: <span id="positionValue">11</span></small>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="branded_terms" class="form-label">Branded Terms (comma-separated)</label>
+                        <input type="text" class="form-control" id="branded_terms" name="branded_terms" 
+                               placeholder="e.g., client name, brand, company">
+                        <small class="text-muted">Keywords containing these terms will be flagged as branded</small>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-lg w-100">
+                        <i class="fas fa-rocket"></i> Process Data
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-info-circle"></i> Required Columns</h5>
+            </div>
+            <div class="card-body">
+                <ul class="list-unstyled">
+                    <li><i class="fas fa-check text-success"></i> Keyword</li>
+                    <li><i class="fas fa-check text-success"></i> Position</li>
+                    <li><i class="fas fa-check text-success"></i> Search Volume</li>
+                    <li><i class="fas fa-check text-success"></i> URL</li>
+                    <li><i class="fas fa-check text-success"></i> Traffic</li>
+                    <li><i class="fas fa-check text-success"></i> Timestamp</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function updatePositionValue(value) {
+    document.getElementById('positionValue').textContent = value;
+}
+</script>
+{% endblock %}
+</file>
+
+<file path="templates/results.html">
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h2><i class="fas fa-chart-line"></i> Processing Results</h2>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ "{:,}".format(stats.total_keywords) }}</h3>
+                <p class="mb-0">Total Keywords</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ "{:,}".format(stats.total_traffic) }}</h3>
+                <p class="mb-0">Total Traffic</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ "{:,}".format(stats.unique_urls) }}</h3>
+                <p class="mb-0">Unique URLs</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ stats.files_processed }}</h3>
+                <p class="mb-0">Files Processed</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if stats.branded_keywords is defined %}
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body text-center">
+                <h4>{{ "{:,}".format(stats.branded_keywords) }}</h4>
+                <p class="mb-0 text-muted">Branded Keywords</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body text-center">
+                <h4>{{ "{:,}".format(stats.non_branded_keywords) }}</h4>
+                <p class="mb-0 text-muted">Non-Branded Keywords</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h4><i class="fas fa-download"></i> Download Results</h4>
+            </div>
+            <div class="card-body">
+                <a href="{{ url_for('download_file', filename='semrush_processed.csv', temp_dir=temp_dir) }}" 
+                   class="btn btn-primary btn-lg w-100">
+                    <i class="fas fa-file-csv"></i> Download Processed CSV
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h4><i class="fas fa-table"></i> Data Preview</h4>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    {{ preview_data|safe }}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-3">
+    <div class="col-12">
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">
+            <i class="fas fa-arrow-left"></i> Process More Files
+        </a>
+    </div>
+</div>
+{% endblock %}
+</file>
+
+<file path="app.py">
+"""
+SEMrush Data Processor - Flask Version
+Simplified application for processing SEMrush CSV exports
+"""
+
+from flask import Flask, render_template, request, send_file, flash, redirect, url_for
+import os
+import tempfile
+from werkzeug.utils import secure_filename
+
+from modules.data_processor import process_csv_files
+from config.settings import config
+
+app = Flask(__name__)
+app.secret_key = 'your-secret-key-here'
+app.config['MAX_CONTENT_LENGTH'] = config.MAX_FILE_SIZE_MB * 1024 * 1024
+app.config['UPLOAD_FOLDER'] = 'uploads'
+
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+ALLOWED_EXTENSIONS = {'csv'}
+
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+@app.route('/')
+def index():
+    return render_template('index.html', config=config)
+
+
+@app.route('/upload', methods=['POST'])
+def upload_files():
+    if 'files' not in request.files:
+        flash('No files selected')
+        return redirect(url_for('index'))
+    
+    files = request.files.getlist('files')
+    
+    if not files or all(file.filename == '' for file in files):
+        flash('No files selected')
+        return redirect(url_for('index'))
+    
+    # Get form parameters
+    max_position = int(request.form.get('max_position', 11))
+    branded_terms = request.form.get('branded_terms', '').strip()
+    
+    # Parse branded terms
+    branded_list = [term.strip() for term in branded_terms.split(',') if term.strip()] if branded_terms else []
+    
+    # Save and validate files
+    valid_files = []
+    
+    for file in files:
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            valid_files.append(filepath)
+        else:
+            flash(f'Invalid file type: {file.filename}')
+    
+    if not valid_files:
+        flash('No valid files to process')
+        return redirect(url_for('index'))
+    
+    try:
+        # Process the files
+        file_objects = [open(filepath, 'rb') for filepath in valid_files]
+        
+        result_df = process_csv_files(file_objects, max_position, branded_list)
+        
+        # Close file objects
+        for f in file_objects:
+            f.close()
+        
+        # Clean up uploaded files
+        for filepath in valid_files:
+            os.remove(filepath)
+        
+        if result_df is not None:
+            # Create temporary directory for results
+            temp_dir = tempfile.mkdtemp()
+            
+            # Save result to CSV
+            output_path = os.path.join(temp_dir, 'semrush_processed.csv')
+            result_df.to_csv(output_path, index=False)
+            
+            # Calculate stats
+            summary_stats = {
+                'total_keywords': len(result_df),
+                'total_traffic': int(result_df['traffic'].sum()) if 'traffic' in result_df.columns else 0,
+                'unique_urls': result_df['url'].nunique() if 'url' in result_df.columns else 0,
+                'files_processed': len(valid_files)
+            }
+            
+            if 'branded' in result_df.columns:
+                summary_stats['branded_keywords'] = int(result_df['branded'].sum())
+                summary_stats['non_branded_keywords'] = int((~result_df['branded']).sum())
+            
+            return render_template(
+                'results.html', 
+                stats=summary_stats,
+                temp_dir=temp_dir,
+                preview_data=result_df.head(config.PREVIEW_ROWS).to_html(
+                    classes='table table-striped', 
+                    table_id='preview-table'
+                )
+            )
+        else:
+            flash('Failed to process files. Please check the file format.')
+            return redirect(url_for('index'))
+    
+    except Exception as e:
+        flash(f'Error processing files: {str(e)}')
+        return redirect(url_for('index'))
+
+
+@app.route('/download/<path:filename>')
+def download_file(filename):
+    temp_dir = request.args.get('temp_dir')
+    if not temp_dir or not os.path.exists(temp_dir):
+        flash('File not found or expired')
+        return redirect(url_for('index'))
+    
+    file_path = os.path.join(temp_dir, filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, as_attachment=True, download_name=filename)
+    else:
+        flash('File not found')
+        return redirect(url_for('index'))
+
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=9000)
+</file>
+
+<file path="Makefile">
+.PHONY: help install run dev prod clean
+
+help:
+	@echo "SEMrush Data Processor - Commands"
+	@echo "=================================="
+	@echo "make install    - Install dependencies"
+	@echo "make run        - Run development server"
+	@echo "make dev        - Run development server"
+	@echo "make prod       - Run production server"
+	@echo "make clean      - Remove cache files"
+
+install:
+	uv sync
+	mkdir -p uploads
+
+run: dev
+
+dev:
+	uv run flask run --debug
+
+prod:
+	@uv pip show gunicorn > /dev/null 2>&1 || uv add gunicorn
+	uv run gunicorn -w 4 -b 0.0.0.0:8000 app:app
+
+clean:
+	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	find . -type f -name "*.pyc" -delete
+	rm -rf .pytest_cache
+</file>
+
+<file path="pyproject.toml">
+[project]
+name = "semrush-data-processor"
+version = "2.0.0"
+description = "SEMrush Data Processor - Simplified Flask Version"
+requires-python = ">=3.9"
+dependencies = [
+    "flask>=3.0.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "werkzeug>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+]
+</file>
+
+<file path="README.md">
+# SEMrush Data Processor
+
+A simple Flask web application for processing SEMrush CSV exports.
+
+## Features
+
+- Process multiple SEMrush CSV files simultaneously
+- Remove duplicates across files
+- Filter by position
+- Identify branded keywords
+- Export combined results as CSV
+
+## Quick Start
+
+```bash
+# Install UV (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install dependencies
+uv sync
+
+# Run the application
+./run.sh
+```
+
+Open your browser to: **http://127.0.0.1:5000**
+
+## Required CSV Columns
+
+Your SEMrush CSV files must contain:
+- `Keyword`
+- `Position`
+- `Search Volume`
+- `URL`
+- `Traffic`
+- `Timestamp`
+
+## Usage
+
+1. Upload one or more SEMrush CSV files
+2. Set the maximum position filter (default: 11)
+3. Optionally enter branded terms (comma-separated)
+4. Click "Process Data"
+5. Download the processed CSV
+
+## Project Structure
+
+```
+semrush-data-processor/
+├── app.py                  # Main Flask application
+├── pyproject.toml          # Dependencies
+├── run.sh                  # Run script
+├── Makefile               
+├── config/
+│   └── settings.py         # Configuration
+├── modules/
+│   └── data_processor.py   # Data processing logic
+└── templates/              # HTML templates
+```
+
+## Commands
+
+```bash
+make install  # Install dependencies
+make run      # Run development server
+make prod     # Run production server
+make clean    # Clean cache files
+```
+
+## License
+
+MIT
+</file>
+
+<file path="run.sh">
+#!/bin/bash
+
+set -e
+
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo -e "${BLUE}SEMrush Data Processor${NC}"
+echo -e "${BLUE}======================${NC}\n"
+
+# Check if uv is installed
+if ! command -v uv &> /dev/null; then
+    echo -e "${YELLOW}UV is not installed. Installing now...${NC}"
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    echo -e "${GREEN}UV installed successfully!${NC}"
+    echo -e "${YELLOW}Please restart your terminal and run this script again.${NC}"
+    exit 0
+fi
+
+# Check if pyproject.toml exists
+if [ ! -f "pyproject.toml" ]; then
+    echo -e "${YELLOW}Error: pyproject.toml not found!${NC}"
+    exit 1
+fi
+
+# Sync dependencies
+echo -e "${BLUE}Installing/updating dependencies...${NC}"
+uv sync
+
+# Create uploads directory
+mkdir -p uploads
+
+# Check for command line arguments
+MODE=${1:-dev}
+
+if [ "$MODE" == "dev" ] || [ "$MODE" == "development" ]; then
+    echo -e "\n${GREEN}Starting Flask development server...${NC}"
+    echo -e "${BLUE}Access the application at: http://127.0.0.1:5000${NC}\n"
+    uv run flask run --debug
+elif [ "$MODE" == "prod" ] || [ "$MODE" == "production" ]; then
+    echo -e "\n${GREEN}Starting production server with Gunicorn...${NC}"
+    
+    if ! uv pip show gunicorn &> /dev/null; then
+        echo -e "${YELLOW}Gunicorn not found. Installing...${NC}"
+        uv add gunicorn
+    fi
+    
+    echo -e "${BLUE}Access the application at: http://127.0.0.1:8000${NC}\n"
+    uv run gunicorn -w 4 -b 0.0.0.0:8000 app:app
+else
+    echo -e "${YELLOW}Invalid mode: $MODE${NC}"
+    echo -e "Usage: ./run.sh [dev|prod]"
+    exit 1
+fi
+</file>
+
+</files>

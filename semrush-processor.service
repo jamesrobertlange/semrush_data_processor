@@ -1,0 +1,43 @@
+[Unit]
+Description=SEMrush Data Processor Flask Application
+After=network.target
+
+[Service]
+Type=notify
+User=root
+Group=root
+WorkingDirectory=/var/www/semrush-processor
+Environment="PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="SECRET_KEY=CHANGE_THIS_TO_RANDOM_STRING"
+Environment="MAX_FILE_SIZE_MB=100"
+Environment="MAX_WORKERS=2"
+Environment="UPLOAD_FOLDER=/tmp/semrush_uploads"
+
+# Use UV to run gunicorn
+ExecStart=/root/.cargo/bin/uv run gunicorn \
+    --workers 2 \
+    --threads 2 \
+    --worker-class gthread \
+    --bind 0.0.0.0:8000 \
+    --timeout 300 \
+    --max-requests 1000 \
+    --max-requests-jitter 50 \
+    --access-logfile /var/log/semrush-processor/access.log \
+    --error-logfile /var/log/semrush-processor/error.log \
+    --log-level info \
+    app:app
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
+
+[Install]
+WantedBy=multi-user.target
