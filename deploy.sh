@@ -50,12 +50,29 @@ echo -e "${GREEN}✓ Directories created${NC}"
 
 # Step 4: Application setup
 echo -e "${YELLOW}[4/8] Setting up application...${NC}"
-cd "$APP_DIR"
+
+# Clone or pull repository
+if [ -d "$APP_DIR/.git" ]; then
+    echo -e "${BLUE}Updating existing repository...${NC}"
+    cd "$APP_DIR"
+    git pull
+else
+    echo -e "${BLUE}Cloning repository...${NC}"
+    rm -rf "$APP_DIR"
+    git clone https://github.com/jamesrobertlange/semrush_data_processor.git "$APP_DIR"
+    cd "$APP_DIR"
+fi
 
 if [ ! -f "pyproject.toml" ]; then
-    echo -e "${RED}Error: pyproject.toml not found in $APP_DIR${NC}"
-    echo -e "${YELLOW}Please upload your application files to $APP_DIR first${NC}"
+    echo -e "${RED}Error: pyproject.toml not found${NC}"
     exit 1
+fi
+
+# Replace app.py with production version if it exists
+if [ -f "app_production.py" ]; then
+    echo -e "${BLUE}Using production app.py...${NC}"
+    mv app.py app_original.py.bak 2>/dev/null || true
+    mv app_production.py app.py
 fi
 
 # Install dependencies
