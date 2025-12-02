@@ -209,7 +209,6 @@ def upload_files():
                 pass
         return redirect(url_for('index'))
 
-
 @app.route('/download/<path:filename>')
 def download_file(filename):
     # Security check: ensure filename is from this session
@@ -226,27 +225,18 @@ def download_file(filename):
         flash('File not found')
         return redirect(url_for('index'))
     
-    # Use X-Accel-Redirect for efficient file serving
-    from flask import make_response
-    response = make_response()
-    response.headers['X-Accel-Redirect'] = f'/internal-downloads/{filename}'
-    response.headers['Content-Type'] = 'text/csv'
-    response.headers['Content-Disposition'] = f'attachment; filename=semrush_processed.csv'
+    # Use Flask's send_file for direct download
+    response = send_file(
+        file_path,
+        mimetype='text/csv',
+        as_attachment=True,
+        download_name='semrush_processed.csv'
+    )
     
-    # Schedule file cleanup after download
-    # (Nginx will handle the actual file transfer)
-    @response.call_on_close
-    def cleanup():
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            if 'download_filename' in session:
-                session.pop('download_filename')
-        except Exception as e:
-            print(f"Error cleaning up file: {str(e)}")
+    # Clear session after sending
+    session.pop('download_filename', None)
     
     return response
-
 
 @app.errorhandler(413)
 def too_large(e):

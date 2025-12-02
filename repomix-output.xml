@@ -376,376 +376,9 @@ function updatePositionValue(value) {
 {% endblock %}
 </file>
 
-<file path="templates/results.html">
-{% extends "base.html" %}
-
-{% block content %}
-<div class="row mb-4">
-    <div class="col-12">
-        <h2><i class="fas fa-chart-line"></i> Processing Results</h2>
-    </div>
-</div>
-
-<div class="row mb-4">
-    <div class="col-md-3">
-        <div class="card stats-card">
-            <div class="card-body text-center">
-                <h3>{{ "{:,}".format(stats.total_keywords) }}</h3>
-                <p class="mb-0">Total Keywords</p>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card stats-card">
-            <div class="card-body text-center">
-                <h3>{{ "{:,}".format(stats.total_traffic) }}</h3>
-                <p class="mb-0">Total Traffic</p>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card stats-card">
-            <div class="card-body text-center">
-                <h3>{{ "{:,}".format(stats.unique_urls) }}</h3>
-                <p class="mb-0">Unique URLs</p>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card stats-card">
-            <div class="card-body text-center">
-                <h3>{{ stats.files_processed }}</h3>
-                <p class="mb-0">Files Processed</p>
-            </div>
-        </div>
-    </div>
-</div>
-
-{% if stats.branded_keywords is defined %}
-<div class="row mb-4">
-    <div class="col-md-6">
-        <div class="card">
-            <div class="card-body text-center">
-                <h4>{{ "{:,}".format(stats.branded_keywords) }}</h4>
-                <p class="mb-0 text-muted">Branded Keywords</p>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-6">
-        <div class="card">
-            <div class="card-body text-center">
-                <h4>{{ "{:,}".format(stats.non_branded_keywords) }}</h4>
-                <p class="mb-0 text-muted">Non-Branded Keywords</p>
-            </div>
-        </div>
-    </div>
-</div>
-{% endif %}
-
-<div class="row mb-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header">
-                <h4><i class="fas fa-download"></i> Download Results</h4>
-            </div>
-            <div class="card-body">
-                <a href="{{ url_for('download_file', filename='semrush_processed.csv', temp_dir=temp_dir) }}" 
-                   class="btn btn-primary btn-lg w-100">
-                    <i class="fas fa-file-csv"></i> Download Processed CSV
-                </a>
-            </div>
-        </div>
-    </div>
-</div>
-
-<div class="row">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header">
-                <h4><i class="fas fa-table"></i> Data Preview</h4>
-            </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    {{ preview_data|safe }}
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<div class="row mt-3">
-    <div class="col-12">
-        <a href="{{ url_for('index') }}" class="btn btn-secondary">
-            <i class="fas fa-arrow-left"></i> Process More Files
-        </a>
-    </div>
-</div>
-{% endblock %}
-</file>
-
 <file path=".gitattributes">
 # Auto detect text files and perform LF normalization
 * text=auto
-</file>
-
-<file path="app_production.py">
-"""
-SEMrush Data Processor - Production Flask Version
-Enhanced with security and session management
-"""
-
-from flask import Flask, render_template, request, send_file, flash, redirect, url_for, session
-import os
-import tempfile
-import shutil
-import secrets
-from datetime import datetime, timedelta
-from werkzeug.utils import secure_filename
-from functools import wraps
-
-from modules.data_processor import process_csv_files
-from config.settings import config
-
-app = Flask(__name__)
-
-# Production-ready secret key
-app.secret_key = os.getenv('SECRET_KEY', secrets.token_hex(32))
-
-# Configuration
-app.config['MAX_CONTENT_LENGTH'] = config.MAX_FILE_SIZE_MB * 1024 * 1024
-app.config['UPLOAD_FOLDER'] = os.getenv('UPLOAD_FOLDER', '/tmp/semrush_uploads')
-app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', 'False') == 'True'
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-
-# Ensure directories exist
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-ALLOWED_EXTENSIONS = {'csv'}
-
-
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-
-def cleanup_old_files(directory, max_age_hours=24):
-    """Remove files older than max_age_hours from directory"""
-    if not os.path.exists(directory):
-        return
-    
-    now = datetime.now()
-    for item in os.listdir(directory):
-        item_path = os.path.join(directory, item)
-        try:
-            if os.path.isfile(item_path) or os.path.isdir(item_path):
-                file_age = now - datetime.fromtimestamp(os.path.getmtime(item_path))
-                if file_age > timedelta(hours=max_age_hours):
-                    if os.path.isfile(item_path):
-                        os.remove(item_path)
-                    else:
-                        shutil.rmtree(item_path)
-        except Exception as e:
-            print(f"Error cleaning up {item_path}: {str(e)}")
-
-
-def generate_session_id():
-    """Generate a unique session ID for user isolation"""
-    return secrets.token_urlsafe(16)
-
-
-@app.before_request
-def before_request():
-    """Initialize session and cleanup old files"""
-    if 'session_id' not in session:
-        session['session_id'] = generate_session_id()
-    
-    # Periodic cleanup (runs on each request, but checks timestamps)
-    cleanup_old_files(app.config['UPLOAD_FOLDER'])
-    cleanup_old_files(tempfile.gettempdir())
-
-
-@app.route('/')
-def index():
-    return render_template('index.html', config=config)
-
-
-@app.route('/upload', methods=['POST'])
-def upload_files():
-    if 'files' not in request.files:
-        flash('No files selected')
-        return redirect(url_for('index'))
-    
-    files = request.files.getlist('files')
-    
-    if not files or all(file.filename == '' for file in files):
-        flash('No files selected')
-        return redirect(url_for('index'))
-    
-    # Validate file count
-    if len(files) > 10:
-        flash('Maximum 10 files allowed at once')
-        return redirect(url_for('index'))
-    
-    # Get form parameters
-    try:
-        max_position = int(request.form.get('max_position', 11))
-        if max_position < 1 or max_position > 100:
-            flash('Position must be between 1 and 100')
-            return redirect(url_for('index'))
-    except ValueError:
-        flash('Invalid position value')
-        return redirect(url_for('index'))
-    
-    branded_terms = request.form.get('branded_terms', '').strip()
-    
-    # Parse branded terms
-    branded_list = [term.strip() for term in branded_terms.split(',') if term.strip()] if branded_terms else []
-    
-    # Create session-specific upload directory
-    session_id = session.get('session_id', generate_session_id())
-    session_upload_dir = os.path.join(app.config['UPLOAD_FOLDER'], session_id)
-    os.makedirs(session_upload_dir, exist_ok=True)
-    
-    # Save and validate files
-    valid_files = []
-    
-    for file in files:
-        if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
-            # Add timestamp to prevent collisions
-            unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
-            filepath = os.path.join(session_upload_dir, unique_filename)
-            file.save(filepath)
-            valid_files.append(filepath)
-        else:
-            flash(f'Invalid file type: {file.filename}. Only CSV files allowed.')
-    
-    if not valid_files:
-        flash('No valid CSV files to process')
-        return redirect(url_for('index'))
-    
-    try:
-        # Process the files
-        file_objects = [open(filepath, 'rb') for filepath in valid_files]
-        
-        result_df = process_csv_files(file_objects, max_position, branded_list)
-        
-        # Close file objects
-        for f in file_objects:
-            f.close()
-        
-        # Clean up uploaded files immediately after processing
-        for filepath in valid_files:
-            try:
-                os.remove(filepath)
-            except Exception as e:
-                print(f"Error removing {filepath}: {str(e)}")
-        
-        # Clean up session upload directory if empty
-        try:
-            if os.path.exists(session_upload_dir) and not os.listdir(session_upload_dir):
-                os.rmdir(session_upload_dir)
-        except Exception as e:
-            print(f"Error removing session directory: {str(e)}")
-        
-        if result_df is not None:
-            # Create session-specific temporary directory for results
-            temp_dir = tempfile.mkdtemp(prefix=f'semrush_{session_id}_')
-            
-            # Save result to CSV
-            output_path = os.path.join(temp_dir, 'semrush_processed.csv')
-            result_df.to_csv(output_path, index=False)
-            
-            # Calculate stats
-            summary_stats = {
-                'total_keywords': len(result_df),
-                'total_traffic': int(result_df['traffic'].sum()) if 'traffic' in result_df.columns else 0,
-                'unique_urls': result_df['url'].nunique() if 'url' in result_df.columns else 0,
-                'files_processed': len(valid_files)
-            }
-            
-            if 'branded' in result_df.columns:
-                summary_stats['branded_keywords'] = int(result_df['branded'].sum())
-                summary_stats['non_branded_keywords'] = int((~result_df['branded']).sum())
-            
-            # Store temp_dir in session
-            session['temp_dir'] = temp_dir
-            
-            return render_template(
-                'results.html', 
-                stats=summary_stats,
-                temp_dir=temp_dir,
-                preview_data=result_df.head(config.PREVIEW_ROWS).to_html(
-                    classes='table table-striped', 
-                    table_id='preview-table'
-                )
-            )
-        else:
-            flash('Failed to process files. Please check the file format and required columns.')
-            return redirect(url_for('index'))
-    
-    except Exception as e:
-        flash(f'Error processing files: {str(e)}')
-        # Clean up on error
-        for filepath in valid_files:
-            try:
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-            except:
-                pass
-        return redirect(url_for('index'))
-
-
-@app.route('/download/<path:filename>')
-def download_file(filename):
-    temp_dir = request.args.get('temp_dir')
-    
-    # Security check: ensure temp_dir is from this session
-    session_temp_dir = session.get('temp_dir')
-    if not temp_dir or temp_dir != session_temp_dir:
-        flash('File not found or access denied')
-        return redirect(url_for('index'))
-    
-    if not os.path.exists(temp_dir):
-        flash('File expired or not found')
-        return redirect(url_for('index'))
-    
-    file_path = os.path.join(temp_dir, filename)
-    if os.path.exists(file_path):
-        response = send_file(file_path, as_attachment=True, download_name=filename)
-        
-        # Clean up temp directory after download
-        @response.call_on_close
-        def cleanup():
-            try:
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-                if 'temp_dir' in session:
-                    session.pop('temp_dir')
-            except Exception as e:
-                print(f"Error cleaning up temp directory: {str(e)}")
-        
-        return response
-    else:
-        flash('File not found')
-        return redirect(url_for('index'))
-
-
-@app.errorhandler(413)
-def too_large(e):
-    flash(f'File too large. Maximum size is {config.MAX_FILE_SIZE_MB}MB')
-    return redirect(url_for('index'))
-
-
-@app.errorhandler(500)
-def internal_error(e):
-    flash('An internal error occurred. Please try again.')
-    return redirect(url_for('index'))
-
-
-if __name__ == '__main__':
-    # Development mode
-    app.run(debug=True, host='0.0.0.0', port=9000)
 </file>
 
 <file path="DEPLOYMENT_CHECKLIST.md">
@@ -1413,82 +1046,6 @@ clean:
 	rm -rf .pytest_cache
 </file>
 
-<file path="nginx-semrush-processor.conf">
-# Nginx configuration for SEMrush Data Processor
-# Place this file in /etc/nginx/sites-available/semrush-processor
-# Then create symlink: ln -s /etc/nginx/sites-available/semrush-processor /etc/nginx/sites-enabled/
-
-# Redirect HTTP to HTTPS (uncomment when SSL is configured)
-# server {
-#     listen 80;
-#     server_name your-domain.com www.your-domain.com;
-#     return 301 https://$server_name$request_uri;
-# }
-
-# Main server block
-server {
-    # For now, listen on HTTP (port 80)
-    listen 80;
-    # listen 443 ssl http2;  # Uncomment for HTTPS
-    
-    server_name 104.168.107.216;  # Change to your domain when ready
-    
-    # SSL configuration (uncomment when you have certificates)
-    # ssl_certificate /etc/ssl/certs/your-domain.crt;
-    # ssl_certificate_key /etc/ssl/private/your-domain.key;
-    # ssl_protocols TLSv1.2 TLSv1.3;
-    # ssl_ciphers HIGH:!aNULL:!MD5;
-    # ssl_prefer_server_ciphers on;
-    
-    # File upload size limit
-    client_max_body_size 100M;
-    client_body_buffer_size 128k;
-    
-    # Timeouts
-    proxy_connect_timeout 300s;
-    proxy_send_timeout 300s;
-    proxy_read_timeout 300s;
-    
-    # Logging
-    access_log /var/log/nginx/semrush-processor-access.log;
-    error_log /var/log/nginx/semrush-processor-error.log;
-    
-    # Proxy to Gunicorn
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # WebSocket support (if needed in future)
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        
-        # Disable buffering for large file uploads
-        proxy_buffering off;
-        proxy_request_buffering off;
-    }
-    
-    # Static files (if you add any)
-    location /static {
-        alias /var/www/semrush-processor/static;
-        expires 30d;
-        add_header Cache-Control "public, immutable";
-    }
-    
-    # Security headers
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    
-    # Hide Nginx version
-    server_tokens off;
-}
-</file>
-
 <file path="production_config.py">
 """
 Production Configuration
@@ -1522,27 +1079,6 @@ class ProductionConfig:
 
 
 production_config = ProductionConfig()
-</file>
-
-<file path="pyproject.toml">
-[project]
-name = "semrush-data-processor"
-version = "2.0.0"
-description = "SEMrush Data Processor - Simplified Flask Version"
-requires-python = ">=3.9"
-dependencies = [
-    "flask>=3.0.0",
-    "pandas>=2.0.0",
-    "numpy>=1.24.0",
-    "werkzeug>=3.0.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.4.0",
-    "black>=23.0.0",
-    "flake8>=6.0.0",
-]
 </file>
 
 <file path="README.md">
@@ -1679,6 +1215,479 @@ else
 fi
 </file>
 
+<file path="templates/results.html">
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h2><i class="fas fa-chart-line"></i> Processing Results</h2>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ "{:,}".format(stats.total_keywords) }}</h3>
+                <p class="mb-0">Total Keywords</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ "{:,}".format(stats.total_traffic) }}</h3>
+                <p class="mb-0">Total Traffic</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ "{:,}".format(stats.unique_urls) }}</h3>
+                <p class="mb-0">Unique URLs</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stats-card">
+            <div class="card-body text-center">
+                <h3>{{ stats.files_processed }}</h3>
+                <p class="mb-0">Files Processed</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if stats.branded_keywords is defined %}
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body text-center">
+                <h4>{{ "{:,}".format(stats.branded_keywords) }}</h4>
+                <p class="mb-0 text-muted">Branded Keywords</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body text-center">
+                <h4>{{ "{:,}".format(stats.non_branded_keywords) }}</h4>
+                <p class="mb-0 text-muted">Non-Branded Keywords</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h4><i class="fas fa-download"></i> Download Results</h4>
+            </div>
+            <div class="card-body">
+                <a href="{{ url_for('download_file', filename=filename) }}" 
+                class="btn btn-primary btn-lg w-100">
+                    <i class="fas fa-file-csv"></i> Download Processed CSV
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h4><i class="fas fa-table"></i> Data Preview</h4>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    {{ preview_data|safe }}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-3">
+    <div class="col-12">
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">
+            <i class="fas fa-arrow-left"></i> Process More Files
+        </a>
+    </div>
+</div>
+{% endblock %}
+</file>
+
+<file path="app_production.py">
+"""
+SEMrush Data Processor - Production Flask Version
+Enhanced with security and session management
+"""
+
+from flask import Flask, render_template, request, send_file, flash, redirect, url_for, session
+import os
+import tempfile
+import shutil
+import secrets
+from datetime import datetime, timedelta
+from werkzeug.utils import secure_filename
+from functools import wraps
+
+from modules.data_processor import process_csv_files
+from config.settings import config
+
+app = Flask(__name__)
+
+# Production-ready secret key
+app.secret_key = os.getenv('SECRET_KEY', secrets.token_hex(32))
+
+# Configuration
+app.config['MAX_CONTENT_LENGTH'] = config.MAX_FILE_SIZE_MB * 1024 * 1024
+app.config['UPLOAD_FOLDER'] = os.getenv('UPLOAD_FOLDER', '/tmp/semrush_uploads')
+app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', 'False') == 'True'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+# Ensure directories exist
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+ALLOWED_EXTENSIONS = {'csv'}
+
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def cleanup_old_files(directory, max_age_hours=24):
+    """Remove files older than max_age_hours from directory"""
+    if not os.path.exists(directory):
+        return
+    
+    now = datetime.now()
+    for item in os.listdir(directory):
+        item_path = os.path.join(directory, item)
+        try:
+            if os.path.isfile(item_path) or os.path.isdir(item_path):
+                file_age = now - datetime.fromtimestamp(os.path.getmtime(item_path))
+                if file_age > timedelta(hours=max_age_hours):
+                    if os.path.isfile(item_path):
+                        os.remove(item_path)
+                    else:
+                        shutil.rmtree(item_path)
+        except Exception as e:
+            print(f"Error cleaning up {item_path}: {str(e)}")
+
+
+def generate_session_id():
+    """Generate a unique session ID for user isolation"""
+    return secrets.token_urlsafe(16)
+
+
+@app.before_request
+def before_request():
+    """Initialize session and cleanup old files"""
+    if 'session_id' not in session:
+        session['session_id'] = generate_session_id()
+    
+    # Periodic cleanup (runs on each request, but checks timestamps)
+    cleanup_old_files(app.config['UPLOAD_FOLDER'])
+    cleanup_old_files(tempfile.gettempdir())
+
+
+@app.route('/')
+def index():
+    return render_template('index.html', config=config)
+
+
+@app.route('/upload', methods=['POST'])
+def upload_files():
+    if 'files' not in request.files:
+        flash('No files selected')
+        return redirect(url_for('index'))
+    
+    files = request.files.getlist('files')
+    
+    if not files or all(file.filename == '' for file in files):
+        flash('No files selected')
+        return redirect(url_for('index'))
+    
+    # Validate file count
+    if len(files) > 10:
+        flash('Maximum 10 files allowed at once')
+        return redirect(url_for('index'))
+    
+    # Get form parameters
+    try:
+        max_position = int(request.form.get('max_position', 11))
+        if max_position < 1 or max_position > 100:
+            flash('Position must be between 1 and 100')
+            return redirect(url_for('index'))
+    except ValueError:
+        flash('Invalid position value')
+        return redirect(url_for('index'))
+    
+    branded_terms = request.form.get('branded_terms', '').strip()
+    
+    # Parse branded terms
+    branded_list = [term.strip() for term in branded_terms.split(',') if term.strip()] if branded_terms else []
+    
+    # Create session-specific upload directory
+    session_id = session.get('session_id', generate_session_id())
+    session_upload_dir = os.path.join(app.config['UPLOAD_FOLDER'], session_id)
+    os.makedirs(session_upload_dir, exist_ok=True)
+    
+    # Save and validate files
+    valid_files = []
+    
+    for file in files:
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            # Add timestamp to prevent collisions
+            unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
+            filepath = os.path.join(session_upload_dir, unique_filename)
+            file.save(filepath)
+            valid_files.append(filepath)
+        else:
+            flash(f'Invalid file type: {file.filename}. Only CSV files allowed.')
+    
+    if not valid_files:
+        flash('No valid CSV files to process')
+        return redirect(url_for('index'))
+    
+    try:
+        # Process the files
+        file_objects = [open(filepath, 'rb') for filepath in valid_files]
+        
+        result_df = process_csv_files(file_objects, max_position, branded_list)
+        
+        # Close file objects
+        for f in file_objects:
+            f.close()
+        
+        # Clean up uploaded files immediately after processing
+        for filepath in valid_files:
+            try:
+                os.remove(filepath)
+            except Exception as e:
+                print(f"Error removing {filepath}: {str(e)}")
+        
+        # Clean up session upload directory if empty
+        try:
+            if os.path.exists(session_upload_dir) and not os.listdir(session_upload_dir):
+                os.rmdir(session_upload_dir)
+        except Exception as e:
+            print(f"Error removing session directory: {str(e)}")
+
+        if result_df is not None:
+            # Create permanent downloads directory instead of temp
+            downloads_dir = '/var/www/semrush-processor/downloads'
+            os.makedirs(downloads_dir, exist_ok=True)
+            
+            # Generate unique filename
+            unique_id = secrets.token_urlsafe(16)
+            filename = f'{unique_id}_semrush_processed.csv'
+            output_path = os.path.join(downloads_dir, filename)
+            
+            # Save result to CSV
+            result_df.to_csv(output_path, index=False)
+            
+            # Store filename in session (not full path for security)
+            session['download_filename'] = filename
+            
+            # Calculate stats
+            summary_stats = {
+                'total_keywords': len(result_df),
+                'total_traffic': int(result_df['traffic'].sum()) if 'traffic' in result_df.columns else 0,
+                'unique_urls': result_df['url'].nunique() if 'url' in result_df.columns else 0,
+                'files_processed': len(valid_files)
+            }
+            
+            if 'branded' in result_df.columns:
+                summary_stats['branded_keywords'] = int(result_df['branded'].sum())
+                summary_stats['non_branded_keywords'] = int((~result_df['branded']).sum())
+            
+            return render_template(
+                'results.html', 
+                stats=summary_stats,
+                filename=filename,  # ← Pass filename instead of temp_dir
+                preview_data=result_df.head(config.PREVIEW_ROWS).to_html(
+                    classes='table table-striped', 
+                    table_id='preview-table'
+                )
+            )
+        else:
+            flash('Failed to process files. Please check the file format and required columns.')
+            return redirect(url_for('index'))
+    
+    except Exception as e:
+        flash(f'Error processing files: {str(e)}')
+        # Clean up on error
+        for filepath in valid_files:
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except:
+                pass
+        return redirect(url_for('index'))
+
+
+@app.route('/download/<path:filename>')
+def download_file(filename):
+    # Security check: ensure filename is from this session
+    session_filename = session.get('download_filename')
+    if not session_filename or filename != session_filename:
+        flash('File not found or access denied')
+        return redirect(url_for('index'))
+    
+    # Build safe file path
+    downloads_dir = '/var/www/semrush-processor/downloads'
+    file_path = os.path.join(downloads_dir, filename)
+    
+    if not os.path.exists(file_path):
+        flash('File not found')
+        return redirect(url_for('index'))
+    
+    # Use X-Accel-Redirect for efficient file serving
+    from flask import make_response
+    response = make_response()
+    response.headers['X-Accel-Redirect'] = f'/internal-downloads/{filename}'
+    response.headers['Content-Type'] = 'text/csv'
+    response.headers['Content-Disposition'] = f'attachment; filename=semrush_processed.csv'
+    
+    # Schedule file cleanup after download
+    # (Nginx will handle the actual file transfer)
+    @response.call_on_close
+    def cleanup():
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            if 'download_filename' in session:
+                session.pop('download_filename')
+        except Exception as e:
+            print(f"Error cleaning up file: {str(e)}")
+    
+    return response
+
+
+@app.errorhandler(413)
+def too_large(e):
+    flash(f'File too large. Maximum size is {config.MAX_FILE_SIZE_MB}MB')
+    return redirect(url_for('index'))
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    flash('An internal error occurred. Please try again.')
+    return redirect(url_for('index'))
+
+
+if __name__ == '__main__':
+    # Development mode
+    app.run(debug=True, host='0.0.0.0', port=9000)
+</file>
+
+<file path="nginx-semrush-processor.conf">
+# Nginx configuration for SEMrush Data Processor
+# Place this file in /etc/nginx/sites-available/semrush-processor
+# Then create symlink: ln -s /etc/nginx/sites-available/semrush-processor /etc/nginx/sites-enabled/
+
+# Redirect HTTP to HTTPS (uncomment when SSL is configured)
+# server {
+#     listen 80;
+#     server_name your-domain.com www.your-domain.com;
+#     return 301 https://$server_name$request_uri;
+# }
+
+# Main server block
+server {
+    # For now, listen on HTTP (port 80)
+    listen 80;
+    # listen 443 ssl http2;  # Uncomment for HTTPS
+    
+    server_name 104.168.107.216;  # Change to your domain when ready
+    
+    # SSL configuration (uncomment when you have certificates)
+    # ssl_certificate /etc/ssl/certs/your-domain.crt;
+    # ssl_certificate_key /etc/ssl/private/your-domain.key;
+    # ssl_protocols TLSv1.2 TLSv1.3;
+    # ssl_ciphers HIGH:!aNULL:!MD5;
+    # ssl_prefer_server_ciphers on;
+    
+    # File upload size limit
+    client_max_body_size 1000M;
+    client_body_buffer_size 128k;
+    
+    # Timeouts
+    proxy_connect_timeout 300s;
+    proxy_send_timeout 300s;
+    proxy_read_timeout 300s;
+    
+    # Logging
+    access_log /var/log/nginx/semrush-processor-access.log;
+    error_log /var/log/nginx/semrush-processor-error.log;
+    
+    # Proxy to Gunicorn
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # WebSocket support (if needed in future)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Disable buffering for large file uploads
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
+    
+    # Static files (if you add any)
+    location /static {
+        alias /var/www/semrush-processor/static;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+    
+    # Security headers
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    
+    # Hide Nginx version
+    server_tokens off;
+}
+</file>
+
+<file path="pyproject.toml">
+[project]
+name = "semrush-data-processor"
+version = "2.0.0"
+description = "SEMrush Data Processor - Simplified Flask Version"
+requires-python = ">=3.9"
+dependencies = [
+    "flask>=3.0.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "werkzeug>=3.0.0",
+    "gunicorn>=21.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+]
+</file>
+
 <file path="semrush-processor.service">
 [Unit]
 Description=SEMrush Data Processor Flask Application
@@ -1808,7 +1817,7 @@ if [ -f "app_production.py" ]; then
 fi
 
 # Install dependencies
-/root/.cargo/bin/uv sync
+uv sync
 echo -e "${GREEN}✓ Dependencies installed${NC}"
 
 # Step 5: Generate secret key
