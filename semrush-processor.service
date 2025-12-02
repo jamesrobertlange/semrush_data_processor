@@ -7,14 +7,14 @@ Type=notify
 User=root
 Group=root
 WorkingDirectory=/var/www/semrush-processor
-Environment="PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="SECRET_KEY=CHANGE_THIS_TO_RANDOM_STRING"
 Environment="MAX_FILE_SIZE_MB=100"
 Environment="MAX_WORKERS=2"
 Environment="UPLOAD_FOLDER=/tmp/semrush_uploads"
 
-# Use UV to run gunicorn
-ExecStart=/root/.cargo/bin/uv run gunicorn \
+# Use UV to run gunicorn (uv will be in PATH)
+ExecStart=/bin/bash -c 'source /root/.local/bin/env 2>/dev/null || true; uv run gunicorn \
     --workers 2 \
     --threads 2 \
     --worker-class gthread \
@@ -25,7 +25,7 @@ ExecStart=/root/.cargo/bin/uv run gunicorn \
     --access-logfile /var/log/semrush-processor/access.log \
     --error-logfile /var/log/semrush-processor/error.log \
     --log-level info \
-    app:app
+    app:app'
 
 # Restart policy
 Restart=always
