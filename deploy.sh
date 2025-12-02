@@ -80,7 +80,7 @@ if [ -f "app_production.py" ]; then
 fi
 
 # Install dependencies
-/root/.cargo/bin/uv sync
+uv sync
 echo -e "${GREEN}✓ Dependencies installed${NC}"
 
 # Step 5: Generate secret key

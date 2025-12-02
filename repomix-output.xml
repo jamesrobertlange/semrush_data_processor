@@ -50,11 +50,19 @@ templates/
   base.html
   index.html
   results.html
-app.py
+.gitattributes
+app_production.py
+deploy.sh
+DEPLOYMENT_CHECKLIST.md
+DEPLOYMENT_GUIDE.md
+gunicorn_config.py
 Makefile
+nginx-semrush-processor.conf
+production_config.py
 pyproject.toml
 README.md
 run.sh
+semrush-processor.service
 </directory_structure>
 
 <files>
@@ -160,9 +168,11 @@ def process_csv_files(uploaded_files, max_position, branded_terms):
     
     combined_df.reset_index(drop=True, inplace=True)
     
-    # Filter by position
+    # Convert Position to numeric and filter
     print("Filtering by position...")
+    combined_df['Position'] = pd.to_numeric(combined_df['Position'], errors='coerce')
     filtered_df = combined_df[combined_df["Position"] <= max_position]
+    print(f"Filtered from {len(combined_df):,} to {len(filtered_df):,} rows (position <= {max_position})")
     
     # Select and rename columns
     column_mapping = {
@@ -473,25 +483,42 @@ function updatePositionValue(value) {
 {% endblock %}
 </file>
 
-<file path="app.py">
+<file path=".gitattributes">
+# Auto detect text files and perform LF normalization
+* text=auto
+</file>
+
+<file path="app_production.py">
 """
-SEMrush Data Processor - Flask Version
-Simplified application for processing SEMrush CSV exports
+SEMrush Data Processor - Production Flask Version
+Enhanced with security and session management
 """
 
-from flask import Flask, render_template, request, send_file, flash, redirect, url_for
+from flask import Flask, render_template, request, send_file, flash, redirect, url_for, session
 import os
 import tempfile
+import shutil
+import secrets
+from datetime import datetime, timedelta
 from werkzeug.utils import secure_filename
+from functools import wraps
 
 from modules.data_processor import process_csv_files
 from config.settings import config
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here'
-app.config['MAX_CONTENT_LENGTH'] = config.MAX_FILE_SIZE_MB * 1024 * 1024
-app.config['UPLOAD_FOLDER'] = 'uploads'
 
+# Production-ready secret key
+app.secret_key = os.getenv('SECRET_KEY', secrets.token_hex(32))
+
+# Configuration
+app.config['MAX_CONTENT_LENGTH'] = config.MAX_FILE_SIZE_MB * 1024 * 1024
+app.config['UPLOAD_FOLDER'] = os.getenv('UPLOAD_FOLDER', '/tmp/semrush_uploads')
+app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', 'False') == 'True'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+# Ensure directories exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 ALLOWED_EXTENSIONS = {'csv'}
@@ -499,6 +526,42 @@ ALLOWED_EXTENSIONS = {'csv'}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def cleanup_old_files(directory, max_age_hours=24):
+    """Remove files older than max_age_hours from directory"""
+    if not os.path.exists(directory):
+        return
+    
+    now = datetime.now()
+    for item in os.listdir(directory):
+        item_path = os.path.join(directory, item)
+        try:
+            if os.path.isfile(item_path) or os.path.isdir(item_path):
+                file_age = now - datetime.fromtimestamp(os.path.getmtime(item_path))
+                if file_age > timedelta(hours=max_age_hours):
+                    if os.path.isfile(item_path):
+                        os.remove(item_path)
+                    else:
+                        shutil.rmtree(item_path)
+        except Exception as e:
+            print(f"Error cleaning up {item_path}: {str(e)}")
+
+
+def generate_session_id():
+    """Generate a unique session ID for user isolation"""
+    return secrets.token_urlsafe(16)
+
+
+@app.before_request
+def before_request():
+    """Initialize session and cleanup old files"""
+    if 'session_id' not in session:
+        session['session_id'] = generate_session_id()
+    
+    # Periodic cleanup (runs on each request, but checks timestamps)
+    cleanup_old_files(app.config['UPLOAD_FOLDER'])
+    cleanup_old_files(tempfile.gettempdir())
 
 
 @app.route('/')
@@ -518,12 +581,30 @@ def upload_files():
         flash('No files selected')
         return redirect(url_for('index'))
     
+    # Validate file count
+    if len(files) > 10:
+        flash('Maximum 10 files allowed at once')
+        return redirect(url_for('index'))
+    
     # Get form parameters
-    max_position = int(request.form.get('max_position', 11))
+    try:
+        max_position = int(request.form.get('max_position', 11))
+        if max_position < 1 or max_position > 100:
+            flash('Position must be between 1 and 100')
+            return redirect(url_for('index'))
+    except ValueError:
+        flash('Invalid position value')
+        return redirect(url_for('index'))
+    
     branded_terms = request.form.get('branded_terms', '').strip()
     
     # Parse branded terms
     branded_list = [term.strip() for term in branded_terms.split(',') if term.strip()] if branded_terms else []
+    
+    # Create session-specific upload directory
+    session_id = session.get('session_id', generate_session_id())
+    session_upload_dir = os.path.join(app.config['UPLOAD_FOLDER'], session_id)
+    os.makedirs(session_upload_dir, exist_ok=True)
     
     # Save and validate files
     valid_files = []
@@ -531,14 +612,16 @@ def upload_files():
     for file in files:
         if file and allowed_file(file.filename):
             filename = secure_filename(file.filename)
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            # Add timestamp to prevent collisions
+            unique_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
+            filepath = os.path.join(session_upload_dir, unique_filename)
             file.save(filepath)
             valid_files.append(filepath)
         else:
-            flash(f'Invalid file type: {file.filename}')
+            flash(f'Invalid file type: {file.filename}. Only CSV files allowed.')
     
     if not valid_files:
-        flash('No valid files to process')
+        flash('No valid CSV files to process')
         return redirect(url_for('index'))
     
     try:
@@ -551,13 +634,23 @@ def upload_files():
         for f in file_objects:
             f.close()
         
-        # Clean up uploaded files
+        # Clean up uploaded files immediately after processing
         for filepath in valid_files:
-            os.remove(filepath)
+            try:
+                os.remove(filepath)
+            except Exception as e:
+                print(f"Error removing {filepath}: {str(e)}")
+        
+        # Clean up session upload directory if empty
+        try:
+            if os.path.exists(session_upload_dir) and not os.listdir(session_upload_dir):
+                os.rmdir(session_upload_dir)
+        except Exception as e:
+            print(f"Error removing session directory: {str(e)}")
         
         if result_df is not None:
-            # Create temporary directory for results
-            temp_dir = tempfile.mkdtemp()
+            # Create session-specific temporary directory for results
+            temp_dir = tempfile.mkdtemp(prefix=f'semrush_{session_id}_')
             
             # Save result to CSV
             output_path = os.path.join(temp_dir, 'semrush_processed.csv')
@@ -575,6 +668,9 @@ def upload_files():
                 summary_stats['branded_keywords'] = int(result_df['branded'].sum())
                 summary_stats['non_branded_keywords'] = int((~result_df['branded']).sum())
             
+            # Store temp_dir in session
+            session['temp_dir'] = temp_dir
+            
             return render_template(
                 'results.html', 
                 stats=summary_stats,
@@ -585,31 +681,705 @@ def upload_files():
                 )
             )
         else:
-            flash('Failed to process files. Please check the file format.')
+            flash('Failed to process files. Please check the file format and required columns.')
             return redirect(url_for('index'))
     
     except Exception as e:
         flash(f'Error processing files: {str(e)}')
+        # Clean up on error
+        for filepath in valid_files:
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except:
+                pass
         return redirect(url_for('index'))
 
 
 @app.route('/download/<path:filename>')
 def download_file(filename):
     temp_dir = request.args.get('temp_dir')
-    if not temp_dir or not os.path.exists(temp_dir):
-        flash('File not found or expired')
+    
+    # Security check: ensure temp_dir is from this session
+    session_temp_dir = session.get('temp_dir')
+    if not temp_dir or temp_dir != session_temp_dir:
+        flash('File not found or access denied')
+        return redirect(url_for('index'))
+    
+    if not os.path.exists(temp_dir):
+        flash('File expired or not found')
         return redirect(url_for('index'))
     
     file_path = os.path.join(temp_dir, filename)
     if os.path.exists(file_path):
-        return send_file(file_path, as_attachment=True, download_name=filename)
+        response = send_file(file_path, as_attachment=True, download_name=filename)
+        
+        # Clean up temp directory after download
+        @response.call_on_close
+        def cleanup():
+            try:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+                if 'temp_dir' in session:
+                    session.pop('temp_dir')
+            except Exception as e:
+                print(f"Error cleaning up temp directory: {str(e)}")
+        
+        return response
     else:
         flash('File not found')
         return redirect(url_for('index'))
 
 
+@app.errorhandler(413)
+def too_large(e):
+    flash(f'File too large. Maximum size is {config.MAX_FILE_SIZE_MB}MB')
+    return redirect(url_for('index'))
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    flash('An internal error occurred. Please try again.')
+    return redirect(url_for('index'))
+
+
 if __name__ == '__main__':
+    # Development mode
     app.run(debug=True, host='0.0.0.0', port=9000)
+</file>
+
+<file path="DEPLOYMENT_CHECKLIST.md">
+# 🚀 Quick Deployment Checklist
+
+## Pre-Deployment (On Your Mac)
+
+- [ ] Download all deployment files from Claude
+- [ ] Have your VPS credentials ready (root@104.168.107.216)
+- [ ] Ensure you have your project files locally
+
+## Deployment (Run on VPS)
+
+### Option 1: Automated Deployment (Recommended)
+
+```bash
+# From your Mac
+scp -r /path/to/your/project/* root@104.168.107.216:/var/www/semrush-processor/
+scp deploy.sh semrush-processor.service gunicorn_config.py nginx-semrush-processor.conf app_production.py root@104.168.107.216:/var/www/semrush-processor/
+
+# SSH into VPS
+ssh root@104.168.107.216
+
+# Run deployment
+cd /var/www/semrush-processor
+chmod +x deploy.sh
+sudo ./deploy.sh
+```
+
+- [ ] Upload project files
+- [ ] Upload deployment files  
+- [ ] Run deploy.sh script
+- [ ] Test access at http://104.168.107.216:8000
+
+### Option 2: Manual Deployment
+
+- [ ] SSH into VPS: `ssh root@104.168.107.216`
+- [ ] Install system dependencies: `apt update && apt install -y python3 curl nginx`
+- [ ] Install UV: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- [ ] Create app directory: `mkdir -p /var/www/semrush-processor`
+- [ ] Upload your files
+- [ ] Install dependencies: `uv sync`
+- [ ] Generate secret key
+- [ ] Configure systemd service
+- [ ] Start service: `systemctl start semrush-processor`
+- [ ] Test application
+
+## Post-Deployment Verification
+
+- [ ] Check service status: `systemctl status semrush-processor`
+- [ ] Test upload functionality via browser
+- [ ] Check logs: `tail -f /var/log/semrush-processor/error.log`
+- [ ] Verify memory usage: `free -h`
+- [ ] Process test CSV file
+
+## Security Hardening
+
+- [ ] Set up firewall: `ufw enable`
+- [ ] Change SSH port (optional)
+- [ ] Create non-root user
+- [ ] Set up SSH keys
+- [ ] Configure fail2ban (optional)
+
+## Optional Enhancements
+
+- [ ] Point domain to VPS
+- [ ] Set up SSL with Let's Encrypt
+- [ ] Configure monitoring
+- [ ] Set up automated backups
+- [ ] Configure log rotation
+
+## Accessing Your App
+
+### Current Access (No Domain):
+- Direct: http://104.168.107.216:8000
+- Via Nginx: http://104.168.107.216
+
+### With Domain (After DNS Setup):
+- http://yourdomain.com
+- https://yourdomain.com (after SSL)
+
+## Common Commands
+
+```bash
+# Check service status
+systemctl status semrush-processor
+
+# View logs
+journalctl -u semrush-processor -f
+tail -f /var/log/semrush-processor/error.log
+
+# Restart service
+systemctl restart semrush-processor
+
+# Check memory usage
+free -h
+ps aux | grep gunicorn
+
+# Update application
+cd /var/www/semrush-processor
+git pull
+uv sync
+systemctl restart semrush-processor
+```
+
+## Troubleshooting
+
+If something goes wrong:
+
+1. **Service won't start:**
+   ```bash
+   journalctl -u semrush-processor -n 50
+   ```
+
+2. **Can't access via browser:**
+   ```bash
+   # Check if port is listening
+   netstat -tulpn | grep 8000
+   
+   # Check firewall
+   ufw status
+   ```
+
+3. **High memory usage:**
+   ```bash
+   # Reduce workers in /etc/systemd/system/semrush-processor.service
+   # Change: --workers 2
+   # To: --workers 1
+   systemctl daemon-reload
+   systemctl restart semrush-processor
+   ```
+
+## Support Files Included
+
+- `app_production.py` - Enhanced Flask app with security features
+- `deploy.sh` - Automated deployment script
+- `semrush-processor.service` - Systemd service file
+- `gunicorn_config.py` - Gunicorn production configuration
+- `nginx-semrush-processor.conf` - Nginx reverse proxy config
+- `production_config.py` - Production settings
+- `DEPLOYMENT_GUIDE.md` - Comprehensive deployment guide
+
+---
+
+**Questions?** Refer to DEPLOYMENT_GUIDE.md for detailed instructions.
+</file>
+
+<file path="DEPLOYMENT_GUIDE.md">
+# SEMrush Data Processor - Production Deployment Guide
+
+## 🚀 Quick Start
+
+### From Your Mac Terminal
+
+```bash
+# 1. Upload your code to the VPS
+scp -r /path/to/your/project/* root@104.168.107.216:/var/www/semrush-processor/
+
+# 2. Upload deployment files
+scp deploy.sh root@104.168.107.216:/var/www/semrush-processor/
+scp semrush-processor.service root@104.168.107.216:/var/www/semrush-processor/
+scp gunicorn_config.py root@104.168.107.216:/var/www/semrush-processor/
+scp nginx-semrush-processor.conf root@104.168.107.216:/var/www/semrush-processor/
+scp app_production.py root@104.168.107.216:/var/www/semrush-processor/app.py
+
+# 3. SSH into your VPS
+ssh root@104.168.107.216
+
+# 4. Run deployment script
+cd /var/www/semrush-processor
+chmod +x deploy.sh
+sudo ./deploy.sh
+```
+
+## 📦 Manual Deployment Steps
+
+If you prefer to deploy manually or the script fails:
+
+### 1. Connect and Prepare System
+
+```bash
+ssh root@104.168.107.216
+
+# Update system
+apt update && apt upgrade -y
+
+# Install dependencies
+apt install -y python3 python3-pip git curl build-essential nginx
+
+# Install UV
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+### 2. Upload Application Files
+
+```bash
+# Create directory
+mkdir -p /var/www/semrush-processor
+cd /var/www/semrush-processor
+
+# Option A: SCP from your Mac (run from Mac terminal)
+scp -r /path/to/local/project/* root@104.168.107.216:/var/www/semrush-processor/
+
+# Option B: Git (recommended for version control)
+git clone <your-repo-url> .
+```
+
+### 3. Install Dependencies
+
+```bash
+cd /var/www/semrush-processor
+uv sync
+mkdir -p /var/log/semrush-processor
+mkdir -p /tmp/semrush_uploads
+```
+
+### 4. Configure Environment
+
+```bash
+# Generate a secure secret key
+python3 -c 'import secrets; print(secrets.token_hex(32))'
+
+# Create environment file
+cat > .env << 'EOF'
+SECRET_KEY=<paste-generated-key-here>
+MAX_FILE_SIZE_MB=100
+MAX_WORKERS=2
+UPLOAD_FOLDER=/tmp/semrush_uploads
+EOF
+```
+
+### 5. Set Up Systemd Service
+
+```bash
+# Copy service file
+cp semrush-processor.service /etc/systemd/system/
+
+# Update SECRET_KEY in service file
+nano /etc/systemd/system/semrush-processor.service
+# Replace CHANGE_THIS_TO_RANDOM_STRING with your generated secret key
+
+# Enable and start service
+systemctl daemon-reload
+systemctl enable semrush-processor
+systemctl start semrush-processor
+
+# Check status
+systemctl status semrush-processor
+```
+
+### 6. Configure Nginx (Optional but Recommended)
+
+```bash
+# Copy nginx config
+cp nginx-semrush-processor.conf /etc/nginx/sites-available/semrush-processor
+
+# Enable site
+ln -s /etc/nginx/sites-available/semrush-processor /etc/nginx/sites-enabled/
+
+# Test configuration
+nginx -t
+
+# Restart nginx
+systemctl restart nginx
+```
+
+## 🌐 Accessing Your Application
+
+### Without Domain (Current State)
+
+1. **Direct Access (Port 8000):**
+   ```
+   http://104.168.107.216:8000
+   ```
+
+2. **Via Nginx (Port 80):**
+   ```
+   http://104.168.107.216
+   ```
+
+### With Domain (Future Setup)
+
+1. **Point your domain DNS:**
+   - Create an A record: `yourdomain.com` → `104.168.107.216`
+   - Create an A record: `www.yourdomain.com` → `104.168.107.216`
+
+2. **Update Nginx configuration:**
+   ```bash
+   nano /etc/nginx/sites-available/semrush-processor
+   # Change: server_name 104.168.107.216;
+   # To: server_name yourdomain.com www.yourdomain.com;
+   
+   systemctl restart nginx
+   ```
+
+3. **Set up SSL with Let's Encrypt:**
+   ```bash
+   apt install certbot python3-certbot-nginx
+   certbot --nginx -d yourdomain.com -d www.yourdomain.com
+   ```
+
+## 🔒 Security Considerations
+
+### 1. Firewall Setup
+
+```bash
+# Install UFW
+apt install ufw
+
+# Allow SSH (IMPORTANT: Do this first!)
+ufw allow 22/tcp
+
+# Allow HTTP and HTTPS
+ufw allow 80/tcp
+ufw allow 443/tcp
+
+# Allow Gunicorn (if not using Nginx)
+ufw allow 8000/tcp
+
+# Enable firewall
+ufw enable
+```
+
+### 2. User Isolation & Session Management
+
+The updated `app_production.py` includes:
+- **Session-based user isolation**: Each user gets a unique session ID
+- **Separate upload directories**: Files are isolated per session
+- **Automatic cleanup**: Old files are removed after 24 hours
+- **Secure downloads**: Users can only download their own files
+
+### 3. Change Default Credentials
+
+```bash
+# Create a non-root user
+adduser deploy
+usermod -aG sudo deploy
+
+# Update deployment to use non-root user
+# Edit /etc/systemd/system/semrush-processor.service
+# Change: User=root
+# To: User=deploy
+```
+
+## 🧪 Memory Management & Leak Prevention
+
+### Built-in Protections
+
+The application includes several memory management features:
+
+1. **Worker Process Limits:**
+   - Gunicorn restarts workers after 1000 requests
+   - Prevents memory accumulation in long-running processes
+
+2. **Memory-Optimized Data Processing:**
+   - Pandas datatype optimization
+   - Explicit garbage collection
+   - File processing in chunks
+
+3. **Resource Limits:**
+   ```python
+   # In gunicorn_config.py:
+   max_requests = 1000  # Restart worker after X requests
+   max_requests_jitter = 50  # Add randomness to prevent all workers restarting at once
+   timeout = 300  # Kill unresponsive workers
+   ```
+
+4. **Automatic File Cleanup:**
+   - Uploaded files deleted immediately after processing
+   - Temp directories cleaned after 24 hours
+   - Session directories removed when empty
+
+### Monitoring Memory Usage
+
+```bash
+# Check overall memory
+free -h
+
+# Monitor Gunicorn processes
+ps aux | grep gunicorn
+
+# Check memory per worker
+top -p $(pgrep -d',' -f gunicorn)
+
+# View detailed memory stats
+systemctl status semrush-processor
+```
+
+### Memory Leak Detection
+
+```bash
+# Install memory profiling tools
+pip install memory-profiler
+
+# Add to your code (for testing):
+from memory_profiler import profile
+
+@profile
+def process_csv_files(...):
+    # existing code
+```
+
+## 🔧 UV in Production - Best Practices
+
+### Why UV is Safe for Production
+
+1. **Fast & Reliable:** UV is built in Rust, faster than pip
+2. **Lock Files:** Ensures consistent dependencies via `uv.lock`
+3. **Virtual Environments:** Automatically managed
+4. **Reproducible Builds:** Same versions every time
+
+### Production Considerations
+
+```bash
+# Lock dependencies for production
+uv lock
+
+# Deploy locked dependencies
+uv sync --frozen
+
+# Update dependencies (on dev, then deploy)
+uv sync --upgrade
+uv lock
+# Commit uv.lock to git
+```
+
+### Environment Variables
+
+```bash
+# Set in systemd service or .env file
+UV_SYSTEM_PYTHON=1  # Use system Python
+UV_NO_CACHE=1  # Don't cache in production
+```
+
+## 📊 Monitoring & Logging
+
+### View Logs
+
+```bash
+# Application logs
+tail -f /var/log/semrush-processor/error.log
+tail -f /var/log/semrush-processor/access.log
+
+# System logs
+journalctl -u semrush-processor -f
+
+# Nginx logs
+tail -f /var/log/nginx/semrush-processor-error.log
+```
+
+### Log Rotation
+
+```bash
+# Create logrotate config
+cat > /etc/logrotate.d/semrush-processor << 'EOF'
+/var/log/semrush-processor/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 0640 root root
+    sharedscripts
+    postrotate
+        systemctl reload semrush-processor > /dev/null 2>&1 || true
+    endscript
+}
+EOF
+```
+
+## 🚨 Troubleshooting
+
+### Service Won't Start
+
+```bash
+# Check service status
+systemctl status semrush-processor
+
+# View detailed logs
+journalctl -u semrush-processor -n 100
+
+# Check if port is in use
+netstat -tulpn | grep 8000
+
+# Test gunicorn directly
+cd /var/www/semrush-processor
+uv run gunicorn -w 1 -b 0.0.0.0:8000 app:app
+```
+
+### High Memory Usage
+
+```bash
+# Reduce workers in gunicorn_config.py
+workers = 1  # Start with fewer workers
+
+# Reduce max_requests
+max_requests = 500  # Restart workers more frequently
+
+# Restart service
+systemctl restart semrush-processor
+```
+
+### Files Not Processing
+
+```bash
+# Check permissions
+ls -la /tmp/semrush_uploads
+chown -R deploy:deploy /tmp/semrush_uploads
+
+# Check disk space
+df -h
+
+# Clear old temp files
+find /tmp -name "semrush_*" -mtime +1 -delete
+```
+
+## 🔄 Updating the Application
+
+```bash
+# Pull latest code
+cd /var/www/semrush-processor
+git pull
+
+# Update dependencies
+uv sync
+
+# Restart service
+systemctl restart semrush-processor
+
+# Check if running
+systemctl status semrush-processor
+```
+
+## 📈 Performance Tuning
+
+### For 2.5GB VPS
+
+```python
+# Recommended gunicorn_config.py settings:
+workers = 2  # (2 * CPU cores) + 1, but limited by RAM
+threads = 2  # Per worker
+worker_class = 'gthread'  # Threaded workers use less memory than sync
+max_requests = 1000
+timeout = 300  # For large file processing
+```
+
+### Optimize for Your Traffic
+
+- **Low traffic (<10 concurrent users):** 2 workers, 2 threads
+- **Medium traffic (10-50 users):** 3 workers, 2 threads
+- **High traffic (50+ users):** Consider upgrading VPS
+
+## 🎯 Next Steps
+
+1. ✅ Deploy application using provided scripts
+2. ✅ Test via IP address: `http://104.168.107.216:8000`
+3. ⬜ Point domain to your VPS
+4. ⬜ Set up SSL with Let's Encrypt
+5. ⬜ Configure monitoring (optional: Sentry, New Relic)
+6. ⬜ Set up automated backups
+7. ⬜ Create non-root user for security
+
+## 📞 Support
+
+If you encounter issues:
+1. Check logs: `journalctl -u semrush-processor -n 100`
+2. Test connectivity: `curl http://localhost:8000`
+3. Verify dependencies: `uv pip list`
+4. Check resources: `free -h && df -h`
+</file>
+
+<file path="gunicorn_config.py">
+"""
+Gunicorn configuration file for SEMrush Data Processor
+"""
+import multiprocessing
+import os
+
+# Server socket
+bind = "0.0.0.0:8000"
+backlog = 2048
+
+# Worker processes
+workers = int(os.getenv('GUNICORN_WORKERS', '2'))
+worker_class = 'gthread'
+threads = int(os.getenv('GUNICORN_THREADS', '2'))
+worker_connections = 1000
+max_requests = 1000
+max_requests_jitter = 50
+timeout = 300
+keepalive = 5
+
+# Logging
+accesslog = '/var/log/semrush-processor/access.log'
+errorlog = '/var/log/semrush-processor/error.log'
+loglevel = 'info'
+access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(D)s'
+
+# Process naming
+proc_name = 'semrush-processor'
+
+# Server mechanics
+daemon = False
+pidfile = '/var/run/semrush-processor.pid'
+umask = 0
+user = None
+group = None
+tmp_upload_dir = None
+
+# SSL (uncomment when you have SSL certificates)
+# keyfile = '/etc/ssl/private/your-domain.key'
+# certfile = '/etc/ssl/certs/your-domain.crt'
+
+# Server hooks
+def on_starting(server):
+    """Called just before the master process is initialized"""
+    print("Starting SEMrush Data Processor...")
+
+def on_reload(server):
+    """Called to recycle workers during a reload"""
+    print("Reloading SEMrush Data Processor...")
+
+def when_ready(server):
+    """Called just after the server is started"""
+    print("SEMrush Data Processor is ready to accept connections")
+
+def worker_int(worker):
+    """Called when a worker receives the SIGINT or SIGQUIT signal"""
+    print(f"Worker {worker.pid} received shutdown signal")
+
+def worker_abort(worker):
+    """Called when a worker receives the SIGABRT signal"""
+    print(f"Worker {worker.pid} aborted")
 </file>
 
 <file path="Makefile">
@@ -641,6 +1411,117 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete
 	rm -rf .pytest_cache
+</file>
+
+<file path="nginx-semrush-processor.conf">
+# Nginx configuration for SEMrush Data Processor
+# Place this file in /etc/nginx/sites-available/semrush-processor
+# Then create symlink: ln -s /etc/nginx/sites-available/semrush-processor /etc/nginx/sites-enabled/
+
+# Redirect HTTP to HTTPS (uncomment when SSL is configured)
+# server {
+#     listen 80;
+#     server_name your-domain.com www.your-domain.com;
+#     return 301 https://$server_name$request_uri;
+# }
+
+# Main server block
+server {
+    # For now, listen on HTTP (port 80)
+    listen 80;
+    # listen 443 ssl http2;  # Uncomment for HTTPS
+    
+    server_name 104.168.107.216;  # Change to your domain when ready
+    
+    # SSL configuration (uncomment when you have certificates)
+    # ssl_certificate /etc/ssl/certs/your-domain.crt;
+    # ssl_certificate_key /etc/ssl/private/your-domain.key;
+    # ssl_protocols TLSv1.2 TLSv1.3;
+    # ssl_ciphers HIGH:!aNULL:!MD5;
+    # ssl_prefer_server_ciphers on;
+    
+    # File upload size limit
+    client_max_body_size 100M;
+    client_body_buffer_size 128k;
+    
+    # Timeouts
+    proxy_connect_timeout 300s;
+    proxy_send_timeout 300s;
+    proxy_read_timeout 300s;
+    
+    # Logging
+    access_log /var/log/nginx/semrush-processor-access.log;
+    error_log /var/log/nginx/semrush-processor-error.log;
+    
+    # Proxy to Gunicorn
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # WebSocket support (if needed in future)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Disable buffering for large file uploads
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
+    
+    # Static files (if you add any)
+    location /static {
+        alias /var/www/semrush-processor/static;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+    
+    # Security headers
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    
+    # Hide Nginx version
+    server_tokens off;
+}
+</file>
+
+<file path="production_config.py">
+"""
+Production Configuration
+"""
+import os
+import secrets
+from dataclasses import dataclass
+
+
+@dataclass
+class ProductionConfig:
+    # Security
+    SECRET_KEY: str = os.getenv('SECRET_KEY', secrets.token_hex(32))
+    
+    # File handling
+    MAX_FILE_SIZE_MB: int = int(os.getenv('MAX_FILE_SIZE_MB', '100'))
+    MAX_WORKERS: int = int(os.getenv('MAX_WORKERS', '2'))
+    PREVIEW_ROWS: int = 10
+    
+    # Upload settings
+    UPLOAD_FOLDER: str = '/tmp/semrush_uploads'
+    ALLOWED_EXTENSIONS: set = {'csv'}
+    
+    # Session settings
+    SESSION_COOKIE_SECURE: bool = True  # Enable when using HTTPS
+    SESSION_COOKIE_HTTPONLY: bool = True
+    SESSION_COOKIE_SAMESITE: str = 'Lax'
+    
+    # Cleanup settings
+    TEMP_FILE_MAX_AGE_HOURS: int = 24
+
+
+production_config = ProductionConfig()
 </file>
 
 <file path="pyproject.toml">
@@ -794,6 +1675,220 @@ elif [ "$MODE" == "prod" ] || [ "$MODE" == "production" ]; then
 else
     echo -e "${YELLOW}Invalid mode: $MODE${NC}"
     echo -e "Usage: ./run.sh [dev|prod]"
+    exit 1
+fi
+</file>
+
+<file path="semrush-processor.service">
+[Unit]
+Description=SEMrush Data Processor Flask Application
+After=network.target
+
+[Service]
+Type=notify
+User=root
+Group=root
+WorkingDirectory=/var/www/semrush-processor
+Environment="PATH=/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="SECRET_KEY=CHANGE_THIS_TO_RANDOM_STRING"
+Environment="MAX_FILE_SIZE_MB=100"
+Environment="MAX_WORKERS=2"
+Environment="UPLOAD_FOLDER=/tmp/semrush_uploads"
+
+# Use UV to run gunicorn (uv will be in PATH)
+ExecStart=/bin/bash -c 'source /root/.local/bin/env 2>/dev/null || true; uv run gunicorn \
+    --workers 2 \
+    --threads 2 \
+    --worker-class gthread \
+    --bind 0.0.0.0:8000 \
+    --timeout 300 \
+    --max-requests 1000 \
+    --max-requests-jitter 50 \
+    --access-logfile /var/log/semrush-processor/access.log \
+    --error-logfile /var/log/semrush-processor/error.log \
+    --log-level info \
+    app:app'
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
+
+[Install]
+WantedBy=multi-user.target
+</file>
+
+<file path="deploy.sh">
+#!/bin/bash
+
+# SEMrush Data Processor - Production Deployment Script
+# Run this script on your VPS to set up the application
+
+set -e
+
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+APP_DIR="/var/www/semrush-processor"
+LOG_DIR="/var/log/semrush-processor"
+SERVICE_NAME="semrush-processor"
+
+echo -e "${BLUE}======================================${NC}"
+echo -e "${BLUE}SEMrush Data Processor Deployment${NC}"
+echo -e "${BLUE}======================================${NC}\n"
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then 
+    echo -e "${RED}Please run as root (use sudo)${NC}"
+    exit 1
+fi
+
+# Step 1: System dependencies
+echo -e "${YELLOW}[1/8] Installing system dependencies...${NC}"
+apt update
+apt install -y python3 python3-pip git curl build-essential nginx
+
+# Step 2: Install UV
+echo -e "${YELLOW}[2/8] Installing UV package manager...${NC}"
+if ! command -v uv &> /dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # UV installs to ~/.local/bin
+    export PATH="$HOME/.local/bin:$PATH"
+    echo -e "${GREEN}✓ UV installed${NC}"
+else
+    echo -e "${GREEN}✓ UV already installed${NC}"
+fi
+
+# Ensure UV is in PATH
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
+# Step 3: Create directories
+echo -e "${YELLOW}[3/8] Creating application directories...${NC}"
+mkdir -p "$APP_DIR"
+mkdir -p "$LOG_DIR"
+mkdir -p /tmp/semrush_uploads
+chmod 755 "$LOG_DIR"
+echo -e "${GREEN}✓ Directories created${NC}"
+
+# Step 4: Application setup
+echo -e "${YELLOW}[4/8] Setting up application...${NC}"
+
+# Clone or pull repository
+if [ -d "$APP_DIR/.git" ]; then
+    echo -e "${BLUE}Updating existing repository...${NC}"
+    cd "$APP_DIR"
+    git pull
+else
+    echo -e "${BLUE}Cloning repository...${NC}"
+    rm -rf "$APP_DIR"
+    git clone https://github.com/jamesrobertlange/semrush_data_processor.git "$APP_DIR"
+    cd "$APP_DIR"
+fi
+
+if [ ! -f "pyproject.toml" ]; then
+    echo -e "${RED}Error: pyproject.toml not found${NC}"
+    exit 1
+fi
+
+# Replace app.py with production version if it exists
+if [ -f "app_production.py" ]; then
+    echo -e "${BLUE}Using production app.py...${NC}"
+    mv app.py app_original.py.bak 2>/dev/null || true
+    mv app_production.py app.py
+fi
+
+# Install dependencies
+/root/.cargo/bin/uv sync
+echo -e "${GREEN}✓ Dependencies installed${NC}"
+
+# Step 5: Generate secret key
+echo -e "${YELLOW}[5/8] Generating secret key...${NC}"
+SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+echo -e "${GREEN}✓ Secret key generated${NC}"
+
+# Step 6: Configure systemd service
+echo -e "${YELLOW}[6/8] Configuring systemd service...${NC}"
+
+if [ -f "semrush-processor.service" ]; then
+    # Update SECRET_KEY in service file
+    sed -i "s/CHANGE_THIS_TO_RANDOM_STRING/$SECRET_KEY/" semrush-processor.service
+    
+    cp semrush-processor.service /etc/systemd/system/
+    systemctl daemon-reload
+    echo -e "${GREEN}✓ Systemd service configured${NC}"
+else
+    echo -e "${YELLOW}⚠ semrush-processor.service not found, skipping...${NC}"
+fi
+
+# Step 7: Configure Nginx (optional)
+echo -e "${YELLOW}[7/8] Nginx configuration...${NC}"
+read -p "Do you want to configure Nginx as reverse proxy? (y/n): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if [ -f "nginx-semrush-processor.conf" ]; then
+        cp nginx-semrush-processor.conf /etc/nginx/sites-available/semrush-processor
+        ln -sf /etc/nginx/sites-available/semrush-processor /etc/nginx/sites-enabled/
+        
+        # Test nginx configuration
+        nginx -t
+        if [ $? -eq 0 ]; then
+            systemctl restart nginx
+            echo -e "${GREEN}✓ Nginx configured and restarted${NC}"
+        else
+            echo -e "${RED}✗ Nginx configuration test failed${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠ nginx-semrush-processor.conf not found${NC}"
+    fi
+else
+    echo -e "${YELLOW}⊘ Skipping Nginx configuration${NC}"
+fi
+
+# Step 8: Start the service
+echo -e "${YELLOW}[8/8] Starting the application...${NC}"
+systemctl enable $SERVICE_NAME
+systemctl start $SERVICE_NAME
+
+# Wait a moment for service to start
+sleep 2
+
+# Check service status
+if systemctl is-active --quiet $SERVICE_NAME; then
+    echo -e "${GREEN}✓ Service started successfully${NC}"
+    
+    echo -e "\n${BLUE}======================================${NC}"
+    echo -e "${GREEN}Deployment Complete!${NC}"
+    echo -e "${BLUE}======================================${NC}\n"
+    
+    echo -e "${YELLOW}Access your application at:${NC}"
+    echo -e "  • Direct: ${BLUE}http://104.168.107.216:8000${NC}"
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo -e "  • Via Nginx: ${BLUE}http://104.168.107.216${NC}"
+    fi
+    
+    echo -e "\n${YELLOW}Useful commands:${NC}"
+    echo -e "  • Check status:  ${BLUE}systemctl status $SERVICE_NAME${NC}"
+    echo -e "  • View logs:     ${BLUE}tail -f $LOG_DIR/error.log${NC}"
+    echo -e "  • Restart:       ${BLUE}systemctl restart $SERVICE_NAME${NC}"
+    echo -e "  • Stop:          ${BLUE}systemctl stop $SERVICE_NAME${NC}"
+    
+    echo -e "\n${YELLOW}Log files:${NC}"
+    echo -e "  • Access: $LOG_DIR/access.log"
+    echo -e "  • Errors: $LOG_DIR/error.log"
+    
+else
+    echo -e "${RED}✗ Service failed to start${NC}"
+    echo -e "${YELLOW}Check logs: journalctl -u $SERVICE_NAME -n 50${NC}"
     exit 1
 fi
 </file>
