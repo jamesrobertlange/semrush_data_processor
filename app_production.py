@@ -156,14 +156,22 @@ def upload_files():
                 os.rmdir(session_upload_dir)
         except Exception as e:
             print(f"Error removing session directory: {str(e)}")
-        
+
         if result_df is not None:
-            # Create session-specific temporary directory for results
-            temp_dir = tempfile.mkdtemp(prefix=f'semrush_{session_id}_')
+            # Create permanent downloads directory instead of temp
+            downloads_dir = '/var/www/semrush-processor/downloads'
+            os.makedirs(downloads_dir, exist_ok=True)
+            
+            # Generate unique filename
+            unique_id = secrets.token_urlsafe(16)
+            filename = f'{unique_id}_semrush_processed.csv'
+            output_path = os.path.join(downloads_dir, filename)
             
             # Save result to CSV
-            output_path = os.path.join(temp_dir, 'semrush_processed.csv')
             result_df.to_csv(output_path, index=False)
+            
+            # Store filename in session (not full path for security)
+            session['download_filename'] = filename
             
             # Calculate stats
             summary_stats = {
@@ -177,13 +185,10 @@ def upload_files():
                 summary_stats['branded_keywords'] = int(result_df['branded'].sum())
                 summary_stats['non_branded_keywords'] = int((~result_df['branded']).sum())
             
-            # Store temp_dir in session
-            session['temp_dir'] = temp_dir
-            
             return render_template(
                 'results.html', 
                 stats=summary_stats,
-                temp_dir=temp_dir,
+                filename=filename,  # ← Pass filename instead of temp_dir
                 preview_data=result_df.head(config.PREVIEW_ROWS).to_html(
                     classes='table table-striped', 
                     table_id='preview-table'
@@ -207,37 +212,40 @@ def upload_files():
 
 @app.route('/download/<path:filename>')
 def download_file(filename):
-    temp_dir = request.args.get('temp_dir')
-    
-    # Security check: ensure temp_dir is from this session
-    session_temp_dir = session.get('temp_dir')
-    if not temp_dir or temp_dir != session_temp_dir:
+    # Security check: ensure filename is from this session
+    session_filename = session.get('download_filename')
+    if not session_filename or filename != session_filename:
         flash('File not found or access denied')
         return redirect(url_for('index'))
     
-    if not os.path.exists(temp_dir):
-        flash('File expired or not found')
-        return redirect(url_for('index'))
+    # Build safe file path
+    downloads_dir = '/var/www/semrush-processor/downloads'
+    file_path = os.path.join(downloads_dir, filename)
     
-    file_path = os.path.join(temp_dir, filename)
-    if os.path.exists(file_path):
-        response = send_file(file_path, as_attachment=True, download_name=filename)
-        
-        # Clean up temp directory after download
-        @response.call_on_close
-        def cleanup():
-            try:
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir)
-                if 'temp_dir' in session:
-                    session.pop('temp_dir')
-            except Exception as e:
-                print(f"Error cleaning up temp directory: {str(e)}")
-        
-        return response
-    else:
+    if not os.path.exists(file_path):
         flash('File not found')
         return redirect(url_for('index'))
+    
+    # Use X-Accel-Redirect for efficient file serving
+    from flask import make_response
+    response = make_response()
+    response.headers['X-Accel-Redirect'] = f'/internal-downloads/{filename}'
+    response.headers['Content-Type'] = 'text/csv'
+    response.headers['Content-Disposition'] = f'attachment; filename=semrush_processed.csv'
+    
+    # Schedule file cleanup after download
+    # (Nginx will handle the actual file transfer)
+    @response.call_on_close
+    def cleanup():
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            if 'download_filename' in session:
+                session.pop('download_filename')
+        except Exception as e:
+            print(f"Error cleaning up file: {str(e)}")
+    
+    return response
 
 
 @app.errorhandler(413)
