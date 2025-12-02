@@ -34,11 +34,15 @@ apt install -y python3 python3-pip git curl build-essential nginx
 echo -e "${YELLOW}[2/8] Installing UV package manager...${NC}"
 if ! command -v uv &> /dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.cargo/bin:$PATH"
+    # UV installs to ~/.local/bin
+    export PATH="$HOME/.local/bin:$PATH"
     echo -e "${GREEN}✓ UV installed${NC}"
 else
     echo -e "${GREEN}✓ UV already installed${NC}"
 fi
+
+# Ensure UV is in PATH
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
 # Step 3: Create directories
 echo -e "${YELLOW}[3/8] Creating application directories...${NC}"
